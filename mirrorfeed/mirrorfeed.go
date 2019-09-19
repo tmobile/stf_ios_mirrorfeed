@@ -137,7 +137,7 @@ func main() {
                 imgMsg.msg = msg
                 imgCh <- imgMsg
 
-                fmt.Printf("Width: %d, Height: %d, Size: %d\n", config.Width, config.Height, rawData.Len() )
+                //fmt.Printf("Width: %d, Height: %d, Size: %d\n", config.Width, config.Height, rawData.Len() )
                 imgnum++
             }
         }
@@ -157,7 +157,7 @@ func dummyReceiver(imgCh <-chan ImgMsg,dummyCh <-chan DummyMsg,imgs map[int]ImgT
                         lock.Lock()
                         delete(imgs,imgMsg.imgNum)
                         lock.Unlock()
-                        fmt.Printf("X.");
+                        //fmt.Printf("X.");
                     case controlMsg := <- dummyCh:
                         if controlMsg.msg == DummyStop {
                             running = false
