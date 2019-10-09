@@ -11,7 +11,8 @@ import (
     "net/http"
     "os"
     "sync"
-  
+    "time"
+    
     "./mods/mjpeg"
     "github.com/gorilla/websocket"
 )
@@ -52,11 +53,22 @@ type DummyMsg struct {
     msg int
 }
 
+type Stats struct {
+    recv int
+    dumped int
+    sent int
+    dummyActive bool
+    socketConnected bool
+    waitCnt int
+}
+
 func main() {
-	mirrorPort := os.Args[1]
-	listen_addr = fmt.Sprintf( "0.0.0.0:%s", mirrorPort )
+    mirrorPort := os.Args[1]
+    listen_addr = fmt.Sprintf( "0.0.0.0:%s", mirrorPort )
 	
     filename := os.Args[2]
+    
+    tunName := os.Args[3]
     
     var fd *os.File
     var err error
@@ -66,50 +78,69 @@ func main() {
         fmt.Printf( err.Error() )
         os.Exit( 1 )
     }
-    for _, iface := range ifaces {
-        //fmt.Printf("Found interface: %s\n", iface.Name )
-        addrs, err := iface.Addrs()
-        if err != nil {
-            fmt.Printf( err.Error() )
-            os.Exit( 1 )
+    
+    if tunName == "none" {
+        fmt.Printf("No tunnel specified; listening on all interfaces\n")
+    } else {
+        foundInterface := false
+        for _, iface := range ifaces {
+            addrs, err := iface.Addrs()
+            if err != nil {
+                fmt.Printf( err.Error() )
+                os.Exit( 1 )
+            }
+            for _, addr := range addrs {
+                var ip net.IP
+                switch v := addr.(type) {
+                    case *net.IPNet:
+                        ip = v.IP
+                    case *net.IPAddr:
+                        ip = v.IP
+                    default:
+                        fmt.Printf("Unknown type\n")
+                }
+                fmt.Printf("Found an interface: %s\n", iface.Name )
+                if iface.Name == tunName {
+                    fmt.Printf( "interface '%s' address: %s\n", tunName, ip.String() ) 
+                    listen_addr = ip.String() + ":" + mirrorPort
+                    foundInterface = true
+                }
+            }
         }
-        for _, addr := range addrs {
-            var ip net.IP
-            switch v := addr.(type) {
-                case *net.IPNet:
-                    ip = v.IP
-                case *net.IPAddr:
-                    ip = v.IP
-                default:
-                    fmt.Printf("Unknown type\n")
-            }
-            if iface.Name == "utun1" {
-                fmt.Printf( "utun1 address: %s\n", ip.String() ) 
-                listen_addr = ip.String() + ":" + mirrorPort
-                //listen_addr = "0.0.0.0:" + mirrorPort
-            }
+        if foundInterface == false {
+            fmt.Printf( "Could not find interface %s\n", tunName )
+            os.Exit( 1 )
         }
     }
   
     imgCh := make(chan ImgMsg, 10)
     dummyCh := make(chan DummyMsg, 2)
-    //var imgs map[int]ImgType
+    
     imgs := make(map[int]ImgType)
     lock := sync.RWMutex{}
+    var stats Stats = Stats{}
+    stats.recv = 0
+    stats.dumped = 0
+    stats.dummyActive = false
+    stats.socketConnected = false
     
-    go dummyReceiver( imgCh, dummyCh, imgs, &lock )
+    statLock := sync.RWMutex{}
+    var dummyRunning = false
+    
+    go dummyReceiver( imgCh, dummyCh, imgs, &lock, &statLock, &stats, &dummyRunning )
         
     go func() {
         for {
             fmt.Printf("Opening incoming video: %s\n", filename)
-            //if filename == "pipe" {
-                fd, _ = os.OpenFile(filename, os.O_RDONLY, 0600)
-            /*} else {
-                fd, err = os.Open(os.Args[1])
-                if err != nil {
-                    log.Fatalln(err)
-                }
-            }*/
+            
+            fd, err = os.OpenFile(filename, os.O_RDONLY, 0600)
+            
+            if err != nil {
+                fmt.Println(err)
+                time.Sleep( time.Second * 1 )
+                continue                
+            }
+            
             sc := mjpeg.Open(fd)
             
             imgnum := 1
@@ -136,18 +167,27 @@ func main() {
                 imgMsg.imgNum = imgnum
                 imgMsg.msg = msg
                 imgCh <- imgMsg
+                
+                statLock.Lock()
+                stats.recv++
+                statLock.Unlock()
 
-                //fmt.Printf("Width: %d, Height: %d, Size: %d\n", config.Width, config.Height, rawData.Len() )
                 imgnum++
             }
+            
+            time.Sleep( time.Second * 2 )
         }
     }()
     
-    startServer( imgCh, dummyCh, imgs, &lock )
+    startServer( imgCh, dummyCh, imgs, &lock, &statLock, &stats, &dummyRunning )
 }
 
-func dummyReceiver(imgCh <-chan ImgMsg,dummyCh <-chan DummyMsg,imgs map[int]ImgType, lock *sync.RWMutex) {
+func dummyReceiver(imgCh <-chan ImgMsg,dummyCh <-chan DummyMsg,imgs map[int]ImgType, lock *sync.RWMutex, statLock *sync.RWMutex, stats *Stats, dummyRunning *bool ) {
+    statLock.Lock()
+    stats.dummyActive = true
+    statLock.Unlock()
     var running bool = true
+    *dummyRunning = true
     for {
         if running == true {
             for {
@@ -157,10 +197,18 @@ func dummyReceiver(imgCh <-chan ImgMsg,dummyCh <-chan DummyMsg,imgs map[int]ImgT
                         lock.Lock()
                         delete(imgs,imgMsg.imgNum)
                         lock.Unlock()
-                        //fmt.Printf("X.");
+                        statLock.Lock()
+                        stats.dumped++
+                        statLock.Unlock()
                     case controlMsg := <- dummyCh:
                         if controlMsg.msg == DummyStop {
                             running = false
+                            lock.Lock()
+                            *dummyRunning = false
+                            lock.Unlock()
+                            statLock.Lock()
+                            stats.dummyActive = false
+                            statLock.Unlock()
                         }
                 }
                 if running == false {
@@ -171,13 +219,22 @@ func dummyReceiver(imgCh <-chan ImgMsg,dummyCh <-chan DummyMsg,imgs map[int]ImgT
             controlMsg := <- dummyCh
             if controlMsg.msg == DummyStart {
                 running = true
+                lock.Lock()
+                *dummyRunning = true
+                lock.Unlock()
+                statLock.Lock()
+                stats.dummyActive = true
+                statLock.Unlock()
             }
         }
     }
 }
 
-func writer(ws *websocket.Conn,imgCh <-chan ImgMsg,writerCh <-chan WriterMsg,imgs map[int]ImgType,lock *sync.RWMutex) {
+func writer(ws *websocket.Conn,imgCh <-chan ImgMsg,writerCh <-chan WriterMsg,imgs map[int]ImgType,lock *sync.RWMutex, statLock *sync.RWMutex, stats *Stats) {
     var running bool = true
+    statLock.Lock()
+    stats.socketConnected = false
+    statLock.Unlock()
     for {
         select {
             case imgMsg := <- imgCh:
@@ -195,12 +252,14 @@ func writer(ws *websocket.Conn,imgCh <-chan ImgMsg,writerCh <-chan WriterMsg,img
         
                 lock.Lock()
                 img := imgs[imgNum]
-                lock.Unlock();
-                        
+                lock.Unlock()
+                
+                lock.Lock()
                 ws.WriteMessage(websocket.TextMessage, []byte(imgMsg.msg))
                 bytes := img.rawData
                 
                 ws.WriteMessage(websocket.BinaryMessage, bytes )
+                lock.Unlock()
                 
                 lock.Lock()
                 delete(imgs,imgNum)
@@ -215,21 +274,50 @@ func writer(ws *websocket.Conn,imgCh <-chan ImgMsg,writerCh <-chan WriterMsg,img
             break
         }
     }
+    statLock.Lock()
+    stats.socketConnected = false
+    statLock.Unlock()
 }
 
-func startServer( imgCh <-chan ImgMsg, dummyCh chan<- DummyMsg, imgs map[int]ImgType, lock *sync.RWMutex ) {
+func startServer( imgCh <-chan ImgMsg, dummyCh chan<- DummyMsg, imgs map[int]ImgType, lock *sync.RWMutex, statLock *sync.RWMutex, stats *Stats, dummyRunning *bool ) {
     fmt.Printf("Listening on %s\n", listen_addr )
     
     echoClosure := func( w http.ResponseWriter, r *http.Request ) {
-        handleEcho( w, r, imgCh, dummyCh, imgs, lock )
+        handleEcho( w, r, imgCh, dummyCh, imgs, lock, statLock, stats, dummyRunning )
+    }
+    statsClosure := func( w http.ResponseWriter, r *http.Request ) {
+        handleStats( w, r, statLock, stats )
     }
     http.HandleFunc( "/echo", echoClosure )
     http.HandleFunc( "/echo/", echoClosure )
     http.HandleFunc( "/", handleRoot )
+    http.HandleFunc( "/stats", statsClosure )
     log.Fatal( http.ListenAndServe( listen_addr, nil ) )
 }
 
-func handleEcho( w http.ResponseWriter, r *http.Request,imgCh <-chan ImgMsg,dummyCh chan<- DummyMsg,imgs map[int]ImgType,lock *sync.RWMutex) {
+func handleStats( w http.ResponseWriter, r *http.Request, statLock *sync.RWMutex, stats *Stats ) {
+    statLock.Lock()
+    recv := stats.recv
+    dumped := stats.dumped
+    dummyActive := stats.dummyActive
+    socketConnected := stats.socketConnected
+    statLock.Unlock()
+    waitCnt := stats.waitCnt
+    
+    var dummyStr string = "no"
+    if dummyActive {
+        dummyStr = "yes"
+    }
+    
+    var socketStr string = "no"
+    if socketConnected {
+        socketStr = "yes"
+    }
+    
+    fmt.Fprintf( w, "Received: %d<br>\nDumped: %d<br>\nDummy Active: %s<br>\nSocket Connected: %s<br>\nWait Count: %d<br>\n", recv, dumped, dummyStr, socketStr, waitCnt )
+}
+
+func handleEcho( w http.ResponseWriter, r *http.Request,imgCh <-chan ImgMsg,dummyCh chan<- DummyMsg,imgs map[int]ImgType,lock *sync.RWMutex, statLock *sync.RWMutex, stats *Stats, dummyRunning *bool) {
     c, err := upgrader.Upgrade(w, r, nil)
     if err != nil {
         log.Print("Upgrade error:", err)
@@ -242,11 +330,25 @@ func handleEcho( w http.ResponseWriter, r *http.Request,imgCh <-chan ImgMsg,dumm
     writerCh := make(chan WriterMsg, 2)
     
     // stop Dummy Reader from sucking up images
-    startMsg := DummyMsg{}
-    startMsg.msg = DummyStop
-    dummyCh <- startMsg
+    stopMsg1 := DummyMsg{}
+    stopMsg1.msg = DummyStop
+    dummyCh <- stopMsg1
     
-    go writer(c,imgCh,writerCh,imgs,lock)
+    // ensure the Dummy Reader has stopped
+    for {
+        lock.Lock()
+        if !*dummyRunning {
+            lock.Unlock()
+            break
+        }
+        lock.Unlock()
+        time.Sleep( time.Second * 1 )
+        statLock.Lock()
+        stats.waitCnt++
+        statLock.Unlock()
+    }
+    
+    go writer(c,imgCh,writerCh,imgs,lock,statLock,stats)
     for {
         mt, message, err := c.ReadMessage()
         if err != nil {
@@ -254,7 +356,9 @@ func handleEcho( w http.ResponseWriter, r *http.Request,imgCh <-chan ImgMsg,dumm
             break
         }
         log.Printf("recv: %s", message)
+        lock.Lock()
         err = c.WriteMessage(mt, message)
+        lock.Unlock()
         if err != nil {
             log.Println("write:", err)
             break
@@ -267,7 +371,7 @@ func handleEcho( w http.ResponseWriter, r *http.Request,imgCh <-chan ImgMsg,dumm
     writerCh <- stopMsg
     
     // trigger Dummy Reader to begin again
-    startMsg = DummyMsg{}
+    startMsg := DummyMsg{}
     startMsg.msg = DummyStart
     dummyCh <- startMsg
 }
