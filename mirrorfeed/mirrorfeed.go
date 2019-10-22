@@ -1,10 +1,10 @@
 package main
 
 import (
-	"fmt"
-	"html/template"
-	"image"
-	_ "image/jpeg"
+    "fmt"
+    "html/template"
+    "image"
+    _ "image/jpeg"
     "io"
     "log"
     "net"
@@ -13,7 +13,7 @@ import (
     "sync"
     "time"
     
-    "./mods/mjpeg"
+    "github.com/tmobile/stf_ios_mirrorfeed/mirrorfeed/mods/mjpeg"
     "github.com/gorilla/websocket"
 )
 
@@ -65,7 +65,7 @@ type Stats struct {
 func main() {
     mirrorPort := os.Args[1]
     listen_addr = fmt.Sprintf( "0.0.0.0:%s", mirrorPort )
-	
+  
     filename := os.Args[2]
     
     tunName := os.Args[3]
@@ -99,9 +99,7 @@ func main() {
                     default:
                         fmt.Printf("Unknown type\n")
                 }
-                fmt.Printf("Found an interface: %s\n", iface.Name )
                 if iface.Name == tunName {
-                    fmt.Printf( "interface '%s' address: %s\n", tunName, ip.String() ) 
                     listen_addr = ip.String() + ":" + mirrorPort
                     foundInterface = true
                 }
@@ -406,94 +404,94 @@ var rootTpl = template.Must(template.New("").Parse(`
 <head>
 <meta charset="utf-8">
 <style>
-	canvas {
-		border: solid 1px black;
-	}
+  canvas {
+    border: solid 1px black;
+  }
 </style>
 <script>
-	function getel( id ) {
-		return document.getElementById( id );
-	}
-	
-	window.addEventListener("load", function(evt) {
-		var output = getel("output");
-		var input  = getel("input");
-		var ctx    = getel("canvas").getContext("2d");
-		var ws;
-		
-		getel("open").onclick = function( event ) {
-			if( ws ) {
-				return false;
-			}
-			ws = new WebSocket("{{.}}");
-			ws.onopen = function( event ) {
-				console.log("Websocket open");
-			}
-			ws.onclose = function( event ) {
-				console.log("Websocket closed");
-				ws = null;
-			}
-			ws.onmessage = function( event ) {
-				if( event.data instanceof Blob ) {
-					var image = new Image();
-					var url;
-					image.onload = function() {
-						ctx.drawImage(image, 0, 0);
-						URL.revokeObjectURL( url );
-					};
-					image.onerror = function( e ) {
-						console.log('Error during loading image:', e);
-					}
-					var blob = event.data;
-					
-					url = URL.createObjectURL( blob );
-					image.src = url;
-				}
-				else {
-					var text = "Response: " + event.data;
-					var d = document.createElement("div");
-					d.innerHTML = text;
-					output.appendChild( d );
-				}
-			}
-			ws.onerror = function( event ) {
-				console.log( "Error: ", event.data );
-			}
-			return false;
-		};
-		getel("send").onclick = function( event ) {
-			if( !ws ) return false;
-			ws.send( input.value );
-			return false;
-		};
-		getel("close").onclick = function( event)  {
-			if(!ws) return false;
-			ws.close();
-			return false;
-		};
-	});
+  function getel( id ) {
+    return document.getElementById( id );
+  }
+  
+  window.addEventListener("load", function(evt) {
+    var output = getel("output");
+    var input  = getel("input");
+    var ctx    = getel("canvas").getContext("2d");
+    var ws;
+    
+    getel("open").onclick = function( event ) {
+      if( ws ) {
+        return false;
+      }
+      ws = new WebSocket("{{.}}");
+      ws.onopen = function( event ) {
+        console.log("Websocket open");
+      }
+      ws.onclose = function( event ) {
+        console.log("Websocket closed");
+        ws = null;
+      }
+      ws.onmessage = function( event ) {
+        if( event.data instanceof Blob ) {
+          var image = new Image();
+          var url;
+          image.onload = function() {
+            ctx.drawImage(image, 0, 0);
+            URL.revokeObjectURL( url );
+          };
+          image.onerror = function( e ) {
+            console.log('Error during loading image:', e);
+          }
+          var blob = event.data;
+          
+          url = URL.createObjectURL( blob );
+          image.src = url;
+        }
+        else {
+          var text = "Response: " + event.data;
+          var d = document.createElement("div");
+          d.innerHTML = text;
+          output.appendChild( d );
+        }
+      }
+      ws.onerror = function( event ) {
+        console.log( "Error: ", event.data );
+      }
+      return false;
+    };
+    getel("send").onclick = function( event ) {
+      if( !ws ) return false;
+      ws.send( input.value );
+      return false;
+    };
+    getel("close").onclick = function( event)  {
+      if(!ws) return false;
+      ws.close();
+      return false;
+    };
+  });
 </script>
 </head>
 <body>
-	<table>
-		<tr>
-			<td valign="top">
-				<canvas id="canvas" width="750" height="1334"></canvas>
-			</td>
-			<td valign="top" width="50%">
-				<form>
-					<button id="open">Open</button>
-					<button id="close">Close</button>
-					<br>
-					<input id="input" type="text" value="">
-					<button id="send">Send</button>
-				</form>
-			</td>
-			<td valign="top" width="50%">
-				<div id="output"></div>
-			</td>
-		</tr>
-	</table>
+  <table>
+    <tr>
+      <td valign="top">
+        <canvas id="canvas" width="750" height="1334"></canvas>
+      </td>
+      <td valign="top" width="50%">
+        <form>
+          <button id="open">Open</button>
+          <button id="close">Close</button>
+          <br>
+          <input id="input" type="text" value="">
+          <button id="send">Send</button>
+        </form>
+      </td>
+      <td valign="top" width="50%">
+        <div id="output"></div>
+      </td>
+    </tr>
+  </table>
 </body>
 </html>
 `))
