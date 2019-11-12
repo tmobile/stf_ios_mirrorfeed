@@ -8,7 +8,6 @@ $(TARGET): mirrorfeed.go go.sum
 go.sum:
 	go get
 	go get .
-	go get ./mods/mjpeg/.
 
 clean:
 	$(RM) $(TARGET) go.sum
