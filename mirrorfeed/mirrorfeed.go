@@ -1,23 +1,28 @@
 package main
 
 import (
+    "encoding/json"
     "fmt"
     "html/template"
     "image"
     _ "image/jpeg"
     "io"
-    "log"
     "net"
     "net/http"
     "os"
+    "strconv"
     "sync"
     "time"
     
     "github.com/tmobile/stf_ios_mirrorfeed/mirrorfeed/mods/mjpeg"
     "github.com/gorilla/websocket"
+    zmq "github.com/zeromq/goczmq"
+    log "github.com/sirupsen/logrus"
 )
 
 var listen_addr = "localhost:8000"
+var reqSock *zmq.Sock
+var reqOb *zmq.ReadWriter
 
 func callback( r *http.Request ) bool {
     return true
@@ -60,6 +65,40 @@ type Stats struct {
     dummyActive bool
     socketConnected bool
     waitCnt int
+    width int
+    height int
+}
+
+func ifAddr( ifName string ) ( addrOut string ) {
+    ifaces, err := net.Interfaces()
+    if err != nil {
+        fmt.Printf( err.Error() )
+        os.Exit( 1 )
+    }
+    
+    addrOut = ""
+    for _, iface := range ifaces {
+        addrs, err := iface.Addrs()
+        if err != nil {
+            fmt.Printf( err.Error() )
+            os.Exit( 1 )
+        }
+        for _, addr := range addrs {
+            var ip net.IP
+            switch v := addr.(type) {
+                case *net.IPNet:
+                    ip = v.IP
+                case *net.IPAddr:
+                    ip = v.IP
+                default:
+                    fmt.Printf("Unknown type\n")
+            }
+            if iface.Name == ifName {
+                addrOut = ip.String()
+            }
+        }
+    }
+    return addrOut
 }
 
 func main() {
@@ -70,42 +109,18 @@ func main() {
     
     tunName := os.Args[3]
     
+    uuid := os.Args[4]
+    
     var fd *os.File
     var err error
-    
-    ifaces, err := net.Interfaces()
-    if err != nil {
-        fmt.Printf( err.Error() )
-        os.Exit( 1 )
-    }
     
     if tunName == "none" {
         fmt.Printf("No tunnel specified; listening on all interfaces\n")
     } else {
-        foundInterface := false
-        for _, iface := range ifaces {
-            addrs, err := iface.Addrs()
-            if err != nil {
-                fmt.Printf( err.Error() )
-                os.Exit( 1 )
-            }
-            for _, addr := range addrs {
-                var ip net.IP
-                switch v := addr.(type) {
-                    case *net.IPNet:
-                        ip = v.IP
-                    case *net.IPAddr:
-                        ip = v.IP
-                    default:
-                        fmt.Printf("Unknown type\n")
-                }
-                if iface.Name == tunName {
-                    listen_addr = ip.String() + ":" + mirrorPort
-                    foundInterface = true
-                }
-            }
-        }
-        if foundInterface == false {
+        addr := ifAddr( tunName )
+        if addr != "" {
+            listen_addr = addr + ":" + mirrorPort
+        } else {
             fmt.Printf( "Could not find interface %s\n", tunName )
             os.Exit( 1 )
         }
@@ -116,7 +131,10 @@ func main() {
     
     imgs := make(map[int]ImgType)
     lock := sync.RWMutex{}
-    var stats Stats = Stats{}
+    var stats Stats = Stats{
+        width: 0,
+        height: 0,
+    }
     stats.recv = 0
     stats.dumped = 0
     stats.dummyActive = false
@@ -124,6 +142,8 @@ func main() {
     
     statLock := sync.RWMutex{}
     var dummyRunning = false
+    
+    setup_zmq()
     
     go dummyReceiver( imgCh, dummyCh, imgs, &lock, &statLock, &stats, &dummyRunning )
         
@@ -167,6 +187,16 @@ func main() {
                 imgCh <- imgMsg
                 
                 statLock.Lock()
+                if( stats.width == 0 ) {
+                    stats.width = config.Width
+                    stats.height = config.Height
+                    msgCoord( map[string]string{
+                      "type": "mirrorfeed_dimensions",
+                      "width": strconv.Itoa( config.Width ),
+                      "height": strconv.Itoa( config.Height ),
+                      "uuid": uuid,
+                    } )
+                }
                 stats.recv++
                 statLock.Unlock()
 
@@ -178,6 +208,8 @@ func main() {
     }()
     
     startServer( imgCh, dummyCh, imgs, &lock, &statLock, &stats, &dummyRunning )
+    
+    close_zmq()
 }
 
 func dummyReceiver(imgCh <-chan ImgMsg,dummyCh <-chan DummyMsg,imgs map[int]ImgType, lock *sync.RWMutex, statLock *sync.RWMutex, stats *Stats, dummyRunning *bool ) {
@@ -233,6 +265,8 @@ func writer(ws *websocket.Conn,imgCh <-chan ImgMsg,writerCh <-chan WriterMsg,img
     statLock.Lock()
     stats.socketConnected = false
     statLock.Unlock()
+    
+    //var prevImg *image.RGBA
     for {
         select {
             case imgMsg := <- imgCh:
@@ -323,7 +357,13 @@ func handleEcho( w http.ResponseWriter, r *http.Request,imgCh <-chan ImgMsg,dumm
     }
     defer c.Close()
     fmt.Printf("Received connection\n")
-    welcome(c)
+    
+    statLock.Lock()
+    width  := stats.width
+    height := stats.height
+    statLock.Unlock()
+    
+    welcome(c, width, height)
         
     writerCh := make(chan WriterMsg, 2)
     
@@ -374,28 +414,68 @@ func handleEcho( w http.ResponseWriter, r *http.Request,imgCh <-chan ImgMsg,dumm
     dummyCh <- startMsg
 }
 
-func welcome( c *websocket.Conn ) ( error ) {
-    msg := `
+func welcome( c *websocket.Conn, width int, height int ) ( error ) {
+    msg := fmt.Sprintf( `
 {
     "version":1,
     "length":24,
     "pid":12733,
-    "realWidth":750,
-    "realHeight":1334,
-    "virtualWidth":375,
-    "virtualHeight":667,
+    "realWidth":%d,
+    "realHeight":%d,
+    "virtualWidth":%d,
+    "virtualHeight":%d,
     "orientation":0,
     "quirks":{
         "dumb":false,
         "alwaysUpright":true,
         "tear":false
     }
-}`
+}`, width, height, width, height )
     return c.WriteMessage( websocket.TextMessage, []byte(msg) )
 }
 
 func handleRoot( w http.ResponseWriter, r *http.Request ) {
     rootTpl.Execute( w, "ws://"+r.Host+"/echo" )
+}
+
+func setup_zmq() {
+    reqSock = zmq.NewSock(zmq.Push)
+    
+    spec := "tcp://127.0.0.1:7300"
+    reqSock.Connect( spec )
+
+    var err error
+    reqOb, err = zmq.NewReadWriter(reqSock)
+    if err != nil {
+        log.WithFields( log.Fields{
+            "type": "zmq_connect_err",
+            "err": err,
+        } ).Error("ZMQ Send Error")
+    }
+    
+    reqOb.SetTimeout(1000)
+    
+    zmqRequest( []byte("dummy") )
+}
+
+func close_zmq() {
+    reqSock.Destroy()
+    reqOb.Destroy()
+}
+
+func msgCoord( content map[string]string ) {
+    data, _ := json.Marshal( content )
+    zmqRequest( data )
+}
+
+func zmqRequest( jsonOut []byte ) {
+    err := reqSock.SendMessage( [][]byte{ jsonOut } )
+    if err != nil {
+        log.WithFields( log.Fields{
+            "type": "zmq_send_err",
+            "err": err,
+        } ).Error("ZMQ Send Error")
+    }
 }
 
 var rootTpl = template.Must(template.New("").Parse(`
